@@ -1,4 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+#![feature(min_specialization)]
 
 #[macro_export]
 macro_rules! ensure {
@@ -9,11 +10,15 @@ macro_rules! ensure {
     }};
 }
 
-#[ink::contract]
+#[openbrush::contract]
 mod house_bidding {
     use ink::{
         prelude::{string::String, vec, vec::Vec},
         storage::Mapping,
+    };
+    use openbrush::{
+        contracts::psp34::{Id, *},
+        traits::{Storage, ZERO_ADDRESS},
     };
 
     pub type HouseId = i32;
@@ -35,6 +40,7 @@ mod house_bidding {
         CantBidTwice,
         ValueTooSmall,
         BiddingLimitNotFulfill,
+        LowBidPriceThanPreviouse,
     }
 
     /// Bidder struct
@@ -96,20 +102,24 @@ mod house_bidding {
     }
 
     #[ink(storage)]
+    #[derive(Storage)]
     pub struct HouseBidding {
         owner: AccountId,
         house_id: HouseId,
         bidder_id: BidderId,
         house: Mapping<HouseId, House>,
+        #[storage_field]
+        psp34: psp34::Data,
     }
 
     impl Default for HouseBidding {
         fn default() -> Self {
             HouseBidding {
-                owner: zero_address(),
+                owner: ZERO_ADDRESS.into(),
                 house_id: Default::default(),
                 bidder_id: Default::default(),
                 house: Mapping::default(),
+                psp34: Default::default(),
             }
         }
     }
@@ -122,7 +132,7 @@ mod house_bidding {
         }
 
         #[ink(message)]
-        pub fn add_house(
+        pub fn mint_house(
             &mut self,
             house_title: String,
             house_description: String,
@@ -156,34 +166,39 @@ mod house_bidding {
             let bidder_id = self.next_bidder_id();
             let bidder_amount = self.env().transferred_value();
 
-            let mut house = match self.house.get(&house_id) {
+            match self.house.get(&house_id) {
                 None => return Err(HouseError::HouseNotFound),
-                Some(house) => house,
-            };
+                Some(mut house) => {
+                    ensure!(
+                        bidder_amount >= house.initial_price,
+                        HouseError::ValueTooSmall
+                    );
 
-            ensure!(
-                bidder_amount >= house.initial_price,
-                HouseError::ValueTooSmall
-            );
+                    for bid in house.bidder.clone() {
+                        ensure!(
+                            bidder_amount > bid.bidder_amount,
+                            HouseError::LowBidPriceThanPreviouse
+                        );
+                        if bid.bidder_account == caller {
+                            return Err(HouseError::CantBidTwice);
+                        }
+                    }
 
-            for bid in house.bidder.clone() {
-                if bid.bidder_account == caller {
-                    return Err(HouseError::CantBidTwice);
+                    let bidder = Bidder {
+                        bidder_id,
+                        bidder_account: caller,
+                        bidder_amount,
+                    };
+
+                    let bidder_len = house.bidder.len() as i32;
+                    ensure!(bidder_len < 5, HouseError::CantBidFurther);
+
+                    house.bidder.push(bidder);
+
+                    self.house.insert(&house_id, &house);
                 }
-            }
-
-            let bidder = Bidder {
-                bidder_id,
-                bidder_account: caller,
-                bidder_amount,
             };
 
-            let bidder_len = house.bidder.len() as i32;
-            ensure!(bidder_len < 5, HouseError::CantBidFurther);
-
-            house.bidder.push(bidder);
-
-            self.house.insert(&house_id, &house);
             Ok(())
         }
 
